@@ -18,6 +18,7 @@
 #include "argcheck.h"
 #include "graph/topo.h"
 #include "npkit/npkit.h"
+#include "msccl_load_analysis.h"
 #include <fcntl.h>
 #include <string.h>
 #include <errno.h>
@@ -475,6 +476,56 @@ NCCL_PARAM(GraphDumpFileRank, "GRAPH_DUMP_FILE_RANK", 0);
 NCCL_PARAM(CollNetNodeThreshold, "COLLNET_NODE_THRESHOLD", 2);
 NCCL_PARAM(NvbPreconnect, "NVB_PRECONNECT", 1);
 
+static ncclResult_t mscclGenAlgoSetup(struct ncclComm* comm, const char* name, int index) {
+  struct mscclAlgorithm* mscclAlgo = &comm->mscclHostComm.mscclDevComm.mscclAlgos[index];
+  strncpy(mscclAlgo->name, name, MSCCL_MAX_ALGO_NAME);
+  mscclAlgo->name[MSCCL_MAX_ALGO_NAME-1] = '\0';
+  mscclAlgo->isValid = true;
+  mscclAlgo->collectiveType = ncclFuncCustomCollective;
+  mscclAlgo->inPlace = false;
+  mscclAlgo->ngpus = comm->nRanks;
+  mscclAlgo->nchunksPerLoop = 1;
+  mscclAlgo->protocol = -1;
+  mscclAlgo->minBytes = 0;
+  mscclAlgo->maxBytes = -1;
+  mscclAlgo->nThreads = 0;
+  mscclAlgo->nScratchChunks = 0; // MSCCL-GENERATED-TODO: scratch support
+  mscclAlgo->needsProxy = 0;
+  mscclAlgo->isGenerated = true;
+
+  AlgorithmInfo info = mscclGeneratedAlgorithmInfoByIndex(index);
+  mscclAlgo->nBlocks = info.num_threads;
+
+  NCCLCHECK(msccl_load_analysis::run(index, comm->rank, comm->nRanks));
+  mscclAlgo->nChannels = msccl_load_analysis::numChannels();
+  if (mscclAlgo->nChannels > MAXCHANNELS) {
+    WARN("MSCCL: Algorithm %s has %d channels, but only %d are supported. Skipping.", name, mscclAlgo->nChannels, MAXCHANNELS);
+    mscclAlgo->isValid = false;
+    return ncclSuccess;
+  }
+  for (int chan = 0; chan < mscclAlgo->nChannels; chan++) {
+    auto recvPeers = msccl_load_analysis::recvPeersForChannel(chan);
+    auto sendPeers = msccl_load_analysis::sendPeersForChannel(chan);
+    if (recvPeers.size() > MSCCL_MAX_NUM_THREAD_BLOCKS_PER_CHANNEL || sendPeers.size() > MSCCL_MAX_NUM_THREAD_BLOCKS_PER_CHANNEL) {
+      WARN("MSCCL: Algorithm %s has a channel with %d senders and %d receivers, but only %d are supported. Skipping.", name, sendPeers.size(), recvPeers.size(), MSCCL_MAX_NUM_THREAD_BLOCKS_PER_CHANNEL);
+      mscclAlgo->isValid = false;
+      return ncclSuccess;
+    }
+    mscclAlgo->mscclChannels[chan].nRecvPeers = recvPeers.size();
+    for (int peerIdx = 0; peerIdx < recvPeers.size(); peerIdx++) {
+      mscclAlgo->mscclChannels[chan].recvPeerInfo[peerIdx].peer = recvPeers[peerIdx];
+      mscclAlgo->mscclChannels[chan].recvPeerInfo[peerIdx].generatedNumOps = msccl_load_analysis::numRecvOpsForChannelAndPeer(chan, recvPeers[peerIdx]);
+    }
+    mscclAlgo->mscclChannels[chan].nSendPeers = sendPeers.size();
+    for (int peerIdx = 0; peerIdx < sendPeers.size(); peerIdx++) {
+      mscclAlgo->mscclChannels[chan].sendPeerInfo[peerIdx].peer = sendPeers[peerIdx];
+      mscclAlgo->mscclChannels[chan].sendPeerInfo[peerIdx].generatedNumOps = msccl_load_analysis::numSendOpsForChannelAndPeer(chan, sendPeers[peerIdx]);
+    }
+  }
+
+  return ncclSuccess;
+}
+
 static ncclResult_t initTransportsRank(struct ncclComm* comm, ncclUniqueId* commId) {
   // We use 2 AllGathers
   // 1. { peerInfo, comm, compCap}
@@ -482,7 +533,7 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, ncclUniqueId* comm
 
   // needs declaration early to avoid goto compilation bug
   int mscclMinRequireNChannels = 0;
-  int numValidMSCCLAlgos = 0;
+  int numValidMSCCLAlgos = MSCCL_NUM_GENERATED_ALGOS;
   int mscclHighestTransportType = TRANSPORT_P2P; // this is captured by all calls to ncclTransportP2pSetup since MSCCL might resue a ring/tree connection
   int highestTransportType; // used as an output for each call
 
@@ -778,6 +829,12 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, ncclUniqueId* comm
   if (highestTransportType > mscclHighestTransportType) mscclHighestTransportType = highestTransportType;
   INFO(NCCL_INIT, "Connected all trees");
 
+  // MSCCL generated algorithms setup. Not connecting yet.
+  #define X(name, index) NCCLCHECKGOTO(mscclGenAlgoSetup(comm, #name, index), ret, affinity_restore);
+  MSCCL_GENERATED_ALGORITHMS_LIST
+  #undef X
+  comm->mscclHostComm.numberOfMSCCLAlgorithms = MSCCL_NUM_GENERATED_ALGOS;
+
   // Read MSCCL algorithms first, but do not connect them yet.
 
   if (getenv("MSCCL_XML_FILES") || getenv("MSCCL_CONFIG")) {
@@ -788,7 +845,7 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, ncclUniqueId* comm
     if (getenv("MSCCL_CONFIG")) {
       NCCLCHECK(mscclGetAllAlgoFromConfigAndSetInfo(getenv("MSCCL_CONFIG"), mscclInfo, ncclMaxNchannels(), comm->rank, comm->nRanks));
     }
-    for (int mscclAlgoIndex = 0; mscclAlgoIndex < mscclInfo->numberOfMSCCLAlgorithms; mscclAlgoIndex++){
+    for (int mscclAlgoIndex = MSCCL_NUM_GENERATED_ALGOS; mscclAlgoIndex < mscclInfo->numberOfMSCCLAlgorithms; mscclAlgoIndex++){
       struct mscclAlgorithm* mscclAlgo = &mscclInfo->mscclDevComm.mscclAlgos[mscclAlgoIndex];
       if (mscclAlgo->isValid){
         numValidMSCCLAlgos++;

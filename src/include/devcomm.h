@@ -9,6 +9,7 @@
 
 #include "nccl.h"
 #include "align.h"
+#include "msccl_generated.h"
 #include "npkit/npkit_struct.h"
 #include <stdint.h>
 

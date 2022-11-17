@@ -10,6 +10,7 @@
 #include "gdrwrap.h"
 #include "bootstrap.h"
 #include "channel.h"
+#include "msccl_generated.h"
 
 #include <cstring> // std::memcpy
 
@@ -18,6 +19,10 @@
   (void*)NCCL_KERN_NAME(func, algo, LL, devredop, dtype), \
   (void*)NCCL_KERN_NAME(func, algo, LL, devredop, dtype), \
   (void*)NCCL_KERN_NAME(func, algo, LL, devredop, dtype)
+#define NCCL_FUNC5_GEN(name, devredop, dtype, nullify) \
+  MACRO_IF(nullify, nullptr, (void*)NCCL_KERN_NAME_GEN(name, LL, devredop, dtype)), \
+  MACRO_IF(nullify, nullptr, (void*)NCCL_KERN_NAME_GEN(name, LL128, devredop, dtype)), \
+  MACRO_IF(nullify, nullptr, (void*)NCCL_KERN_NAME_GEN(name, SIMPLE, devredop, dtype))
 
 #define NCCL_FUNC4(func, devredop, type) \
   (void*)NCCL_FUNC5(func, TREE,    devredop, type), \
@@ -49,6 +54,17 @@
   (void*)NCCL_FUNC4(func, devredop, int8_t), \
   (void*)NCCL_FUNC4(func, devredop, int8_t), \
   (void*)NCCL_FUNC4(func, devredop, int8_t)
+#define NCCL_FUNCS3_GEN(name, devredop, undefforfloat) \
+  (void*)NCCL_FUNC5_GEN(name, devredop, int8_t, 0), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, uint8_t, 0), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, int32_t, 0), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, uint32_t, 0), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, int64_t, 0), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, uint64_t, 0), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, half, undefforfloat), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, float, undefforfloat), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, double, undefforfloat), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, __nv_bfloat16, undefforfloat)
 #else
 // Must be consistent with ncclDataType_t
 #define NCCL_FUNCS3A(func, devredop) \
@@ -71,6 +87,16 @@
   (void*)NCCL_FUNC4(func, devredop, int8_t), \
   (void*)NCCL_FUNC4(func, devredop, int8_t), \
   (void*)NCCL_FUNC4(func, devredop, int8_t)
+#define NCCL_FUNCS3_GEN(name, devredop, undefforfloat) \
+  (void*)NCCL_FUNC5_GEN(name, devredop, int8_t, 0), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, uint8_t, 0), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, int32_t, 0), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, uint32_t, 0), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, int64_t, 0), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, uint64_t, 0), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, half, undefforfloat), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, float, undefforfloat), \
+  (void*)NCCL_FUNC5_GEN(name, devredop, double, undefforfloat)
 #endif
 
 // Must be consistent with ncclDevRedOp_t -- but we only generate kernel for sums.
@@ -88,9 +114,16 @@
   NCCL_FUNCS3B(func, Sum), /*Min*/ \
   NCCL_FUNCS3B(func, Sum), /*PreMulSum*/ \
   NCCL_FUNCS3B(func, Sum)  /*SumPostDiv*/
+#define NCCL_FUNCS2_GEN(name) \
+  NCCL_FUNCS3_GEN(name, Sum, /*undefforfloat=*/0), /*Sum*/ \
+  NCCL_FUNCS3_GEN(name, Prod, /*undefforfloat=*/0), /*Prod*/ \
+  NCCL_FUNCS3_GEN(name, Max, /*undefforfloat=*/0), /*Max*/ \
+  NCCL_FUNCS3_GEN(name, Min, /*undefforfloat=*/0), /*Min*/ \
+  NCCL_FUNCS3_GEN(name, PreMulSum, /*undefforfloat=*/0), /*PreMulSum*/ \
+  NCCL_FUNCS3_GEN(name, SumPostDiv, /*undefforfloat=*/1)  /*SumPostDiv*/
 
 // Must be consistent with the ncclFuncSet enum
-static void* const ncclKerns[1+ncclNumTypes+NCCL_NUM_FUNCTIONS*ncclNumDevRedOps*ncclNumTypes*NCCL_NUM_ALGORITHMS*NCCL_NUM_PROTOCOLS] = {
+static void* const ncclKerns[1+ncclNumTypes+(NCCL_NUM_FUNCTIONS + MSCCL_NUM_GENERATED_ALGOS)*ncclNumDevRedOps*ncclNumTypes*NCCL_NUM_ALGORITHMS*NCCL_NUM_PROTOCOLS] = {
   (void*)NCCL_KERN_NAME(SendRecv, RING, SIMPLE, Sum, int8_t),
   // We don't bake special kernels for the one-rank reductions
   /*int8*/(void*)NCCL_KERN_NAME(SendRecv, RING, SIMPLE, Sum, int8_t),
@@ -112,6 +145,9 @@ static void* const ncclKerns[1+ncclNumTypes+NCCL_NUM_FUNCTIONS*ncclNumDevRedOps*
   NCCL_FUNCS2A(AllReduce),
   NCCL_FUNCS2B(AllToAll),
   NCCL_FUNCS2A(CustomCollective)
+#define X(name, index) ,NCCL_FUNCS2_GEN(name)
+  MSCCL_GENERATED_ALGORITHMS_LIST
+#undef X
 };
 
 // Determine the maximum kernel stack size of all CUDA kernels
@@ -121,7 +157,8 @@ size_t ncclKernMaxLocalSize() {
   cudaFuncAttributes attr = {0};
   size_t max = 0;
   for (int i = 0; i < numNcclKerns; i++) {
-    CUDACHECKGOTO(cudaFuncGetAttributes(&attr, ncclKerns[i]), res, error);
+    if (ncclKerns[i])
+      CUDACHECKGOTO(cudaFuncGetAttributes(&attr, ncclKerns[i]), res, error);
     if (attr.localSizeBytes > max) max = attr.localSizeBytes;
   }
 
@@ -624,7 +661,11 @@ comp_next:
     return ncclSuccess;
   }
 
+  if (info->coll == ncclFuncCustomCollective && info->mscclInfo.mscclAlgoIndex < MSCCL_NUM_GENERATED_ALGOS) {
+    work->header.funcIndex = FUNC_INDEX_GEN(info->mscclInfo.mscclAlgoIndex, info->opFull.op, info->datatype, info->protocol);
+  } else {
   work->header.funcIndex = FUNC_INDEX(info->coll, info->opFull.op, info->datatype, info->algorithm, info->protocol);
+  }
 
   int stepSize   = info->comm->buffSizes[info->protocol]/NCCL_STEPS;
   int chunkSteps = (info->protocol == NCCL_PROTO_SIMPLE && (info->algorithm == NCCL_ALGO_RING || info->algorithm == NCCL_ALGO_MSCCL)) ? info->chunkSteps : 1;
@@ -1513,6 +1554,10 @@ ncclResult_t ncclEnqueueCheck(struct ncclInfo* info) {
         NCCLCHECKGOTO(comm->enqueueInfo->ret, ret, end);
       }
     }
+    // if (info->algorithm == NCCL_ALGO_MSCCL) {
+    //   printf("needs proxy: %d\n", comm->mscclHostComm.mscclDevComm.mscclAlgos[info->mscclInfo.mscclAlgoIndex].needsProxy);
+    // }
+    // printf("Using cuda graph: %d\n", comm->usingCudaGraph);
 
     // Common part between graph mode and non-graph mode
     NCCLCHECKGOTO(ncclLaunchBarrier(comm), ret, end);

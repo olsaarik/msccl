@@ -2,6 +2,7 @@
 #define MSCCL_H_
 
 #include <stdint.h>
+#include "msccl_generated.h"
 
 #define MSCCL_MAX_NUM_STEPS 256
 #define MSCCL_MAX_NUM_THREAD_BLOCKS_PER_CHANNEL 32
@@ -75,6 +76,9 @@ struct mscclChannelPeerInfo {
   int nchunksForPeer[MSCCL_MAX_COUNT];
   int nCountExists;
   int counts[MSCCL_MAX_COUNT];
+  // For generated algorithms skip the chunks/counts thing and directly store the
+  // number of sends/recvs
+  int generatedNumOps;
 };
 
 struct mscclChannelInfo {
@@ -108,8 +112,6 @@ struct mscclAlgorithm {
   int protocol;
   // the range of size in which this algorithm is performant
   int64_t minBytes; int64_t maxBytes;
-  // bid is used as an index into this array
-  struct mscclThreadBlock mscclTBs[MAXCHANNELS*MSCCL_MAX_NUM_THREAD_BLOCKS_PER_CHANNEL];
   // number of channels needed by MSCCL algorithm
   int nChannels;
   // number of necessary threadblock
@@ -121,6 +123,12 @@ struct mscclAlgorithm {
   // number of scratch chunks that MSCCL will use
   int nScratchChunks;
   int8_t needsProxy;
+  bool isGenerated;
+};
+
+struct mscclAlgorithmCode {
+  // bid is used as an index into this array
+  struct mscclThreadBlock mscclTBs[MAXCHANNELS*MSCCL_MAX_NUM_THREAD_BLOCKS_PER_CHANNEL];
 };
 
 // Only related MSCCL algorithm elements necessary for a threadblock
@@ -135,13 +143,17 @@ struct mscclSharedMemoryInfo {
 
 // All MSCCL algorithm info that will be in ncclDevComm
 struct mscclDevCommInfo {
-  struct mscclAlgorithm mscclAlgos[MSCCL_MAX_NUM_ALGOS];
+  struct mscclAlgorithm mscclAlgos[MSCCL_NUM_GENERATED_ALGOS + MSCCL_MAX_NUM_ALGOS];
+  struct mscclAlgorithmCode mscclAlgoCodes[MSCCL_MAX_NUM_ALGOS];
   int8_t needsFence; // a global flag to indicate whether we need to have a fence for any of the MSCCL algos
   // allocate enough MSCCL flags (MSCCL_MAX_NUM_THREAD_BLOCKS_PER_CHANNEL * MAXCHANNELS) to synchronize across thread blocks
   struct mscclFlag* flags;
   // declaration for scratchBuffer. This is only to be accessed by the host
   void* scratchBuffer;
 };
+
+// MSCCL-GENERATED-TODO: make this larger (figure out what's going on with "groups")
+#define MSCCL_GEN_MAX_CHANNELS_PER_THREADBLOCK 1
 
 struct mscclRegistration {
   int algoIndex;

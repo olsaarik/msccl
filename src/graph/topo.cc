@@ -756,7 +756,7 @@ ncclResult_t mscclProtocolStrToId(const char *protocol, int *protocolId) {
   return ncclSuccess;
 }
 
-ncclResult_t mscclGetAlgoFromXMLAndSetAlgo(const char* str, struct mscclAlgorithm* mscclAlgo, int maxNChannels, int rank, int nRanks) {
+ncclResult_t mscclGetAlgoFromXMLAndSetAlgo(const char* str, struct mscclAlgorithm* mscclAlgo, struct mscclAlgorithmCode *mscclAlgoCode, int maxNChannels, int rank, int nRanks) {
   INFO(NCCL_INIT, "MSCCL: Parsing algorithm %s", str);
   struct ncclXml* xml;
   NCCLCHECK(ncclCalloc(&xml, 1));
@@ -914,7 +914,7 @@ ncclResult_t mscclGetAlgoFromXMLAndSetAlgo(const char* str, struct mscclAlgorith
               WARN("MSCCL: peer (%d,%d) and gpu id (%d) must be different", recvpeer, sendpeer, id);
               return ncclInvalidUsage;
             }
-            struct mscclThreadBlock* sTB = &mscclAlgo->mscclTBs[bid];
+            struct mscclThreadBlock* sTB = &mscclAlgoCode->mscclTBs[bid];
             sTB->nsteps = 0;
             if (recvpeer < -1 || sendpeer < -1){
               WARN("MSCCL: wrong recvpeer (%d) or sendpeer (%d) in threadblock %d on gpu %d", recvpeer, sendpeer, bid, id);
@@ -1197,14 +1197,15 @@ ncclResult_t mscclGetAllAlgoFromXMLFilesAndSetInfo(const char* str, struct msccl
   char* tokStr = strdup(str);
   char* tmpStr;
   char* token = strtok_r(tokStr, ":", &tmpStr);
-  mscclInfo->numberOfMSCCLAlgorithms = 0;
+  mscclInfo->numberOfMSCCLAlgorithms = MSCCL_NUM_GENERATED_ALGOS;
   while (token) {
-    if (mscclInfo->numberOfMSCCLAlgorithms == MSCCL_MAX_NUM_ALGOS){
+    if (mscclInfo->numberOfMSCCLAlgorithms == MSCCL_NUM_GENERATED_ALGOS + MSCCL_MAX_NUM_ALGOS){
       WARN("MSCCL: too many algorithms (%d) specified in environment variable MSCCL_XML_FILES. The rest will be ignored.", mscclInfo->numberOfMSCCLAlgorithms);
       break;
     }
     struct mscclAlgorithm* mscclAlgo = &mscclInfo->mscclDevComm.mscclAlgos[mscclInfo->numberOfMSCCLAlgorithms];
-    if (mscclGetAlgoFromXMLAndSetAlgo(token, mscclAlgo, maxNChannels, rank, nRanks) == ncclSuccess){
+    struct mscclAlgorithmCode *mscclAlgoCode = &mscclInfo->mscclDevComm.mscclAlgoCodes[mscclInfo->numberOfMSCCLAlgorithms - MSCCL_NUM_GENERATED_ALGOS];
+    if (mscclGetAlgoFromXMLAndSetAlgo(token, mscclAlgo, mscclAlgoCode, maxNChannels, rank, nRanks) == ncclSuccess){
       mscclInfo->numberOfMSCCLAlgorithms++;
       INFO(NCCL_INIT, "Parsed MSCCL Algorithm %s successfully.", token);
     } else {
@@ -1263,7 +1264,8 @@ ncclResult_t mscclGetAllAlgoFromConfigAndSetInfo(const char* str, struct mscclHo
 
       int algoIndex = mscclInfo->numberOfMSCCLAlgorithms;
       struct mscclAlgorithm* mscclAlgo = &mscclInfo->mscclDevComm.mscclAlgos[algoIndex];
-      if (mscclGetAlgoFromXMLAndSetAlgo(path, mscclAlgo, maxNChannels, rank, nRanks) == ncclSuccess){
+      struct mscclAlgorithmCode *mscclAlgoCode = &mscclInfo->mscclDevComm.mscclAlgoCodes[algoIndex - MSCCL_NUM_GENERATED_ALGOS];
+      if (mscclGetAlgoFromXMLAndSetAlgo(path, mscclAlgo, mscclAlgoCode, maxNChannels, rank, nRanks) == ncclSuccess){
         mscclInfo->numberOfMSCCLAlgorithms++;
         INFO(NCCL_INIT, "Parsed MSCCL Algorithm %s successfully.", path);
 

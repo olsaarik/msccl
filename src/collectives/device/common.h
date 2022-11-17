@@ -10,6 +10,7 @@
 #include "collectives.h"
 #include "devcomm.h"
 #include "op128.h"
+#include "msccl_generated.h"
 
 
 #if __CUDA_ARCH__ >= 800
@@ -138,7 +139,10 @@ struct ncclShmemData {
   };
   uint64_t redOpArgs[NCCL_MAX_DIRECT_ARITY+1];
   struct ncclDevComm comm;
-  struct ncclChannel channel;
+  union {
+    struct ncclChannel channel;
+    struct ncclChannel channels[MSCCL_GEN_MAX_CHANNELS_PER_THREADBLOCK];
+  };
   struct ncclWork work;
   struct mscclSharedMemoryInfo mscclShmem;
 };
@@ -179,24 +183,25 @@ __device__ void ncclKernel(struct ncclDevComm* comm, ncclWorkElem first)  {
   ncclChannel *channel;
   if (Algo == NCCL_ALGO_MSCCL){
     // get the address without causing a global load
-    struct mscclAlgorithm* mscclAlgo = &((ncclDevCommAndChannels*)comm)->mscclInfo->mscclAlgos[first.mscclWork.mscclAlgoIndex];
-    struct mscclThreadBlock* mscclTB = &mscclAlgo->mscclTBs[bid];
+    struct ncclDevCommAndChannels *commAndChans = (ncclDevCommAndChannels*)comm;
+    struct mscclAlgorithm* mscclAlgo = &commAndChans->mscclInfo->mscclAlgos[first.mscclWork.mscclAlgoIndex];
+    struct mscclThreadBlock* mscclTB = &commAndChans->mscclInfo->mscclAlgoCodes[first.mscclWork.mscclAlgoIndex - MSCCL_NUM_GENERATED_ALGOS].mscclTBs[bid];
     // causes a global memory load to channelId. This removes the need for a __syncthreads
     int channelId = mscclTB->channelId;
-    channel = &((ncclDevCommAndChannels*)comm)->channels[channelId];
+    channel = &commAndChans->channels[channelId];
     turn = copyToShmem(&ncclShmem.channel, channel, turn);
 
     turn = copyToShmem(&ncclShmem.mscclShmem.mscclTB, mscclTB, turn);
     if (wid == 0)
-      ncclShmem.mscclShmem.flags = ((ncclDevCommAndChannels*)comm)->mscclInfo->flags;
+      ncclShmem.mscclShmem.flags = commAndChans->mscclInfo->flags;
     if (wid == (1 % nWarps))
-      ncclShmem.mscclShmem.scratchBuffer = ((ncclDevCommAndChannels*)comm)->mscclInfo->scratchBuffer;
+      ncclShmem.mscclShmem.scratchBuffer = commAndChans->mscclInfo->scratchBuffer;
     if (wid == (2 % nWarps))
       ncclShmem.mscclShmem.nchunksPerLoop = mscclAlgo->nchunksPerLoop;
     if (wid == (3 % nWarps))
       ncclShmem.mscclShmem.workIndex = first.mscclWork.workIndex;
     if (wid == (4 % nWarps))
-      ncclShmem.mscclShmem.needsFence = *(&((ncclDevCommAndChannels*)comm)->mscclInfo->needsFence);
+      ncclShmem.mscclShmem.needsFence = *(&commAndChans->mscclInfo->needsFence);
     // MSCCL algorithms always have only one workElement in the queue
     copyToShmem(&ncclShmem.work, &first, tid, nthreads);
     __syncthreads(); // publish ncclShmem
@@ -281,50 +286,74 @@ __device__ void NCCL_FUNC_NAME(func, algo, proto, devredop, type)() { \
   IMPL_COLL_FUNC(func, algo, SIMPLE, devredop, type) \
   IMPL_COLL_KERN(func, algo, LL,     devredop, type, FUNC_INDEX(ncclFunc##func, ncclDev##devredop, ncclType, NCCL_ALGO_##algo, NCCL_PROTO_LL)) \
 
+#define IMPL_COLL4_GEN(name, devredop, type) \
+  IMPL_COLL_KERN_GEN(name, LL,     devredop, type) \
+  IMPL_COLL_KERN_GEN(name, LL128,  devredop, type) \
+  IMPL_COLL_KERN_GEN(name, SIMPLE, devredop, type)
+
 #define IMPL_COLL3(func, devredop, type, ncclType) \
   IMPL_COLL4(func, TREE,    devredop, type, ncclType) \
   IMPL_COLL4(func, RING,    devredop, type, ncclType) \
   IMPL_COLL4(func, MSCCL,   devredop, type, ncclType) \
   IMPL_COLL4(func, COLLNET, devredop, type, ncclType)
 
+// Generated algorithms don't get specialized per TREE/RING/MSCCL/COLLNET/...
+
 #if NCCL_TYPE == 0
 #define IMPL_COLL2(func, devredop) IMPL_COLL3(func, devredop, int8_t,   ncclInt8)
+#define IMPL_COLL2_GEN(name, devredop) IMPL_COLL4_GEN(name, devredop, int8_t)
 #elif NCCL_TYPE == 1
 #define IMPL_COLL2(func, devredop) IMPL_COLL3(func, devredop, uint8_t,  ncclUint8)
+#define IMPL_COLL2_GEN(name, devredop) IMPL_COLL4_GEN(name, devredop, uint8_t)
 #elif NCCL_TYPE == 2
 #define IMPL_COLL2(func, devredop) IMPL_COLL3(func, devredop, int32_t,  ncclInt32)
+#define IMPL_COLL2_GEN(name, devredop) IMPL_COLL4_GEN(name, devredop, int32_t)
 #elif NCCL_TYPE == 3
 #define IMPL_COLL2(func, devredop) IMPL_COLL3(func, devredop, uint32_t, ncclUint32)
+#define IMPL_COLL2_GEN(name, devredop) IMPL_COLL4_GEN(name, devredop, uint32_t)
 #elif NCCL_TYPE == 4
 #define IMPL_COLL2(func, devredop) IMPL_COLL3(func, devredop, int64_t,  ncclInt64)
+#define IMPL_COLL2_GEN(name, devredop) IMPL_COLL4_GEN(name, devredop, int64_t)
 #elif NCCL_TYPE == 5
 #define IMPL_COLL2(func, devredop) IMPL_COLL3(func, devredop, uint64_t, ncclUint64)
+#define IMPL_COLL2_GEN(name, devredop) IMPL_COLL4_GEN(name, devredop, uint64_t)
 #elif NCCL_TYPE == 6
 #define IMPL_COLL2(func, devredop) IMPL_COLL3(func, devredop, half,     ncclFloat16)
+#define IMPL_COLL2_GEN(name, devredop) IMPL_COLL4_GEN(name, devredop, half)
 #elif NCCL_TYPE == 7
 #define IMPL_COLL2(func, devredop) IMPL_COLL3(func, devredop, float,    ncclFloat32)
+#define IMPL_COLL2_GEN(name, devredop) IMPL_COLL4_GEN(name, devredop, float)
 #elif NCCL_TYPE == 8
 #define IMPL_COLL2(func, devredop) IMPL_COLL3(func, devredop, double,   ncclFloat64)
+#define IMPL_COLL2_GEN(name, devredop) IMPL_COLL4_GEN(name, devredop, double)
 #elif NCCL_TYPE == 9 && defined(__CUDA_BF16_TYPES_EXIST__)
 #define IMPL_COLL2(func, devredop) IMPL_COLL3(func, devredop, __nv_bfloat16, ncclBfloat16)
+#define IMPL_COLL2_GEN(name, devredop) IMPL_COLL4_GEN(name, devredop, __nv_bfloat16)
 #endif
 
 // Reduction define all functions
 #if NCCL_OP == 0
 #define IMPL_COLL_R(func) IMPL_COLL2(func, Sum);
+#define IMPL_COLL_GEN(name) IMPL_COLL2_GEN(name, Sum);
 #elif NCCL_OP == 1
 #define IMPL_COLL_R(func) IMPL_COLL2(func, Prod);
+#define IMPL_COLL_GEN(name) IMPL_COLL2_GEN(name, Prod);
 #elif NCCL_OP == 2
 #define IMPL_COLL_R(func) IMPL_COLL2(func, Min);
+#define IMPL_COLL_GEN(name) IMPL_COLL2_GEN(name, Min);
 #elif NCCL_OP == 3
 #define IMPL_COLL_R(func) IMPL_COLL2(func, Max);
+#define IMPL_COLL_GEN(name) IMPL_COLL2_GEN(name, Max);
 #elif NCCL_OP == 4
 #define IMPL_COLL_R(func) IMPL_COLL2(func, PreMulSum);
+#define IMPL_COLL_GEN(name) IMPL_COLL2_GEN(name, PreMulSum);
 #elif NCCL_OP == 5
   #if NCCL_TYPE < 6
     #define IMPL_COLL_R(func) IMPL_COLL2(func, SumPostDiv);
+    #define IMPL_COLL_GEN(name) IMPL_COLL2_GEN(name, SumPostDiv);
   #else
     #define IMPL_COLL_R(func) // skip SumPostDiv for floating point
+    #define IMPL_COLL_GEN(name) // skip SumPostDiv for floating point
   #endif
 #endif
 
