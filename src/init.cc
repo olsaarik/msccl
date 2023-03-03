@@ -493,19 +493,18 @@ static ncclResult_t mscclGenAlgoSetup(struct ncclComm* comm, const char* name, i
   mscclAlgo->needsProxy = 0;
   mscclAlgo->isGenerated = true;
 
-  AlgorithmInfo info = mscclGeneratedAlgorithmInfoByIndex(index);
-  mscclAlgo->nBlocks = info.num_threads;
-
-  NCCLCHECK(msccl_load_analysis::run(index, comm->rank, comm->nRanks));
-  mscclAlgo->nChannels = msccl_load_analysis::numChannels();
+  MSCCLLoadAnalysisResults results;
+  NCCLCHECK(runMSCCLLoadAnalysis(&results, index, comm->rank, comm->nRanks));
+  mscclAlgo->nBlocks = results.numThreadblocks;
+  mscclAlgo->nChannels = results.numChannels;
   if (mscclAlgo->nChannels > MAXCHANNELS) {
     WARN("MSCCL: Algorithm %s has %d channels, but only %d are supported. Skipping.", name, mscclAlgo->nChannels, MAXCHANNELS);
     mscclAlgo->isValid = false;
     return ncclSuccess;
   }
   for (int chan = 0; chan < mscclAlgo->nChannels; chan++) {
-    auto recvPeers = msccl_load_analysis::recvPeersForChannel(chan);
-    auto sendPeers = msccl_load_analysis::sendPeersForChannel(chan);
+    auto recvPeers = results.recvPeersForChannel(chan);
+    auto sendPeers = results.sendPeersForChannel(chan);
     if (recvPeers.size() > MSCCL_MAX_NUM_THREAD_BLOCKS_PER_CHANNEL || sendPeers.size() > MSCCL_MAX_NUM_THREAD_BLOCKS_PER_CHANNEL) {
       WARN("MSCCL: Algorithm %s has a channel with %d senders and %d receivers, but only %d are supported. Skipping.", name, sendPeers.size(), recvPeers.size(), MSCCL_MAX_NUM_THREAD_BLOCKS_PER_CHANNEL);
       mscclAlgo->isValid = false;
@@ -514,12 +513,12 @@ static ncclResult_t mscclGenAlgoSetup(struct ncclComm* comm, const char* name, i
     mscclAlgo->mscclChannels[chan].nRecvPeers = recvPeers.size();
     for (int peerIdx = 0; peerIdx < recvPeers.size(); peerIdx++) {
       mscclAlgo->mscclChannels[chan].recvPeerInfo[peerIdx].peer = recvPeers[peerIdx];
-      mscclAlgo->mscclChannels[chan].recvPeerInfo[peerIdx].generatedNumOps = msccl_load_analysis::numRecvOpsForChannelAndPeer(chan, recvPeers[peerIdx]);
+      mscclAlgo->mscclChannels[chan].recvPeerInfo[peerIdx].generatedNumOps = results.numRecvOpsForChannelAndPeer(chan, recvPeers[peerIdx]);
     }
     mscclAlgo->mscclChannels[chan].nSendPeers = sendPeers.size();
     for (int peerIdx = 0; peerIdx < sendPeers.size(); peerIdx++) {
       mscclAlgo->mscclChannels[chan].sendPeerInfo[peerIdx].peer = sendPeers[peerIdx];
-      mscclAlgo->mscclChannels[chan].sendPeerInfo[peerIdx].generatedNumOps = msccl_load_analysis::numSendOpsForChannelAndPeer(chan, sendPeers[peerIdx]);
+      mscclAlgo->mscclChannels[chan].sendPeerInfo[peerIdx].generatedNumOps = results.numSendOpsForChannelAndPeer(chan, sendPeers[peerIdx]);
     }
   }
 
@@ -831,7 +830,7 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, ncclUniqueId* comm
 
   // MSCCL generated algorithms setup. Not connecting yet.
   #define X(name, index) NCCLCHECKGOTO(mscclGenAlgoSetup(comm, #name, index), ret, affinity_restore);
-  MSCCL_GENERATED_ALGORITHMS_LIST
+  MSCCL_ALGORITHMS_LIST
   #undef X
   comm->mscclHostComm.numberOfMSCCLAlgorithms = MSCCL_NUM_GENERATED_ALGOS;
 

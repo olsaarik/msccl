@@ -11,6 +11,7 @@
 #include "bootstrap.h"
 #include "channel.h"
 #include "msccl_generated.h"
+#include "msccl_enqueue_analysis.h"
 
 #include <cstring> // std::memcpy
 
@@ -146,7 +147,7 @@ static void* const ncclKerns[1+ncclNumTypes+(NCCL_NUM_FUNCTIONS + MSCCL_NUM_GENE
   NCCL_FUNCS2B(AllToAll),
   NCCL_FUNCS2A(CustomCollective)
 #define X(name, index) ,NCCL_FUNCS2_GEN(name)
-  MSCCL_GENERATED_ALGORITHMS_LIST
+  MSCCL_ALGORITHMS_LIST
 #undef X
 };
 
@@ -616,11 +617,25 @@ static ncclResult_t getLoopInfo(struct ncclInfo* info) {
 
 static ncclResult_t checkMSCCLScratchPad(struct ncclInfo* info) {
   struct mscclAlgorithm* mscclAlgo = &info->comm->mscclHostComm.mscclDevComm.mscclAlgos[info->mscclInfo.mscclAlgoIndex];
-  struct mscclHostCommInfo* mscclInfo = &info->comm->mscclHostComm;
-  size_t sizeNeeded = (info->nBytes * (size_t)(mscclAlgo->nScratchChunks)) / (size_t)(mscclAlgo->nchunksPerLoop);
-  if (sizeNeeded > mscclInfo->scratchBufferSize){
-    WARN("MSCCL: MSCCL scratch pad size is smaller than expected %lu < %lu\n", mscclInfo->scratchBufferSize, sizeNeeded);
-    return ncclInternalError;
+  struct mscclHostCommInfo* mscclHostComm = &info->comm->mscclHostComm;
+  if (mscclAlgo->isGenerated) {
+    MSCCLEnqueueAnalysisResults results;
+    NCCLCHECK(runMSCCLEnqueueAnalysis(&results, info->mscclInfo.mscclAlgoIndex, info->comm->rank, info->comm->nRanks, info->count, ncclTypeSize(info->datatype)));
+    if (results.scratchSize > mscclHostComm->scratchBufferSize){
+      if (mscclHostComm->mscclDevComm.scratchBuffer != NULL && mscclHostComm->scratchBufferSize > 0){
+        CUDACHECK(cudaFree(mscclHostComm->mscclDevComm.scratchBuffer));
+        mscclHostComm->mscclDevComm.scratchBuffer = NULL;
+        mscclHostComm->scratchBufferSize = 0;
+      }
+      NCCLCHECK(ncclCudaCalloc((char**)&mscclHostComm->mscclDevComm.scratchBuffer, results.scratchSize));
+      mscclHostComm->scratchBufferSize = results.scratchSize;
+    }
+  } else {
+    size_t sizeNeeded = (info->nBytes * (size_t)(mscclAlgo->nScratchChunks)) / (size_t)(mscclAlgo->nchunksPerLoop);
+    if (sizeNeeded > mscclHostComm->scratchBufferSize){
+      WARN("MSCCL: MSCCL scratch pad size is smaller than expected %lu < %lu\n", mscclHostComm->scratchBufferSize, sizeNeeded);
+      return ncclInternalError;
+    }
   }
   return ncclSuccess;
 }

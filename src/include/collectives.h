@@ -138,7 +138,7 @@ DECL(AllReduce)
 DECL2(AllToAll, Sum, /*undefForFloat=*/0)
 DECL(CustomCollective)
 #define X(name, index) DECL_GEN(name)
-MSCCL_GENERATED_ALGORITHMS_LIST
+MSCCL_ALGORITHMS_LIST
 #undef X
 DECL5(SendRecv, RING, SIMPLE, Sum, int8_t)
 

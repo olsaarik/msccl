@@ -1,16 +1,21 @@
-#include "msccl_load_analysis.h"
+#include "msccl_enqueue_analysis.h"
 #include "msccl_generated.h"
 #include "devcomm.h"
 #include "debug.h"
 
+#include <unordered_map>
+#include <unordered_set>
+#include <optional>
 #include <limits>
 #include <cassert>
 
-struct LoadAnalysisRuntime {
+struct EnqueueAnalysisRuntime {
   size_t rank;
   size_t ranks;
   size_t threadblock;
-  MSCCLLoadAnalysisResults* results;
+  size_t datatypeSize;
+  size_t threadblockScratchSize;
+  MSCCLEnqueueAnalysisResults* results;
 
   template <class T> struct MemRef {
     size_t size;
@@ -24,11 +29,7 @@ struct LoadAnalysisRuntime {
     }
   };
 
-  struct Channel {
-    size_t recvPeer;
-    size_t sendPeer;
-    size_t port;
-  };
+  struct Channel {};
 
   struct Barrier {};
 
@@ -44,17 +45,11 @@ struct LoadAnalysisRuntime {
 
   template <class U> U arith_remui(U lhs, U rhs) { return lhs % rhs; }
 
-  template <class T> void send(Channel &chan, MemRef<T> &chunk) {
-    results->sendOps[{chan.port, chan.sendPeer}]++;
-  }
+  template <class T> void send(Channel &chan, MemRef<T> &chunk) {}
 
-  template <class T> void recv(Channel &chan, MemRef<T> &chunk) {
-    results->recvOps[{chan.port, chan.recvPeer}]++;
-  }
+  template <class T> void recv(Channel &chan, MemRef<T> &chunk) {}
 
-  template <class T> void recv_reduce(Channel &chan, MemRef<T> &chunk) {
-    results->recvOps[{chan.port, chan.recvPeer}]++;
-  }
+  template <class T> void recv_reduce(Channel &chan, MemRef<T> &chunk) {}
 
   size_t proc_id() {
     return rank;
@@ -95,25 +90,20 @@ struct LoadAnalysisRuntime {
   template <class T> void memref_copy(MemRef<T> &source, MemRef<T> &target) {}
 
   inline Channel create_channel(size_t peer, size_t port) {
-    results->numChannels = std::max(results->numChannels, port + 1);
-    results->recvPeers[port].insert(peer);
-    results->sendPeers[port].insert(peer);
-    return Channel{peer, peer, port};
+    return {};
   }
 
   inline Channel create_relay_channel(size_t recv_peer, size_t send_peer, size_t port) {
-    results->numChannels = std::max(results->numChannels, port + 1);
-    results->recvPeers[port].insert(recv_peer);
-    results->sendPeers[port].insert(send_peer);
-    return Channel{recv_peer, send_peer, port};
+    return {};
   }
 
   inline void barrier_init(Barrier &barrier, size_t expected) {}
 
   inline void barrier_wait(Barrier &barrier) {}
 
-  template <class T> inline void buffer_init(Buffer<T>& buffer, size_t size) {
+  template <class T> inline void buffer_init(Buffer<T> &buffer, size_t size) {
     buffer.size = size;
+    threadblockScratchSize += size * datatypeSize;
   }
 
   inline void debug_print(const char *str) {}
@@ -125,50 +115,47 @@ struct LoadAnalysisRuntime {
 namespace algorithms {
   // Include the algorithms in the detail namespace, so that they
   // will use the analysis runtime types and functions.
-  using RT = LoadAnalysisRuntime;
+  using RT = EnqueueAnalysisRuntime;
   using T = void;
   #define MSCCL_FUNC_ATTRIBUTES
   #define GET_MSCCL_ALGORITHMS
   #include "msccl_generated.h.inc"
 } // namespace algorithms
 
-void initRuntime(LoadAnalysisRuntime& runtime, size_t rank, size_t ranks, MSCCLLoadAnalysisResults* results) {
+void initRuntime(EnqueueAnalysisRuntime &runtime, size_t rank, size_t ranks, size_t datatypeSize, MSCCLEnqueueAnalysisResults* results) {
   runtime.rank = rank;
   runtime.ranks = ranks;
   runtime.results = results;
+  runtime.datatypeSize= datatypeSize;
 }
 
-void initThreadblock(LoadAnalysisRuntime& runtime, size_t threadblock) {
+void initThreadblock(EnqueueAnalysisRuntime &runtime, size_t threadblock) {
   runtime.threadblock = threadblock;
+  runtime.threadblockScratchSize = 0;
 }
 
-ncclResult_t runMSCCLLoadAnalysis(MSCCLLoadAnalysisResults* results, int algorithm_index, size_t rank, size_t ranks) {
-  results->numThreadblocks = -1;
-  results->recvPeers.clear();
-  results->sendPeers.clear();
-  results->recvOps.clear();
-  results->sendOps.clear();
-  results->numChannels = 0;
+void updateResults(EnqueueAnalysisRuntime &runtime) {
+  runtime.results->scratchSize = std::max(runtime.results->scratchSize, runtime.threadblockScratchSize);
+}
 
-  // Call each generated algorithm
-  LoadAnalysisRuntime::MemRef<void> input = {1};
-  LoadAnalysisRuntime::MemRef<void> output = {1};
+ncclResult_t runMSCCLEnqueueAnalysis(MSCCLEnqueueAnalysisResults* results, int algorithm_index, size_t rank, size_t ranks, size_t count, size_t datatypeSize) {
+  results->numThreadblocks = -1;
+  results->scratchSize = 0;
+
+  EnqueueAnalysisRuntime::MemRef<void> input = {count};
+  EnqueueAnalysisRuntime::MemRef<void> output = {count};
 #define X(name, index) if (algorithm_index == index) { \
     algorithms::name algo; \
-    initRuntime(algo, rank, ranks, results); \
+    initRuntime(algo, rank, ranks, datatypeSize, results); \
     results->numThreadblocks = algo.init(input, output); \
     for (int tb = 0; tb < results->numThreadblocks; ++tb) { \
       initThreadblock(algo, tb); \
       algo.run(input, output); \
+      updateResults(algo); \
     } \
   }
 MSCCL_ALGORITHMS_LIST
 #undef X
-
-  if (results->numChannels >= MAXCHANNELS) {
-    WARN("MSCCL generated algorithm's number of channels %zu is larger than supported", results->numChannels);
-    return ncclInternalError;
-  }
 
   if (results->numThreadblocks == -1) {
     WARN("MSCCL algorithm %d not found", algorithm_index);
